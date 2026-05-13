@@ -1,0 +1,540 @@
+---
+title: "Trabajo Práctico Final - Regresión Avanzada"
+subtitle: "Maestría en Explotación de Datos y Gestión del Conocimiento - Universidad Austral"
+author: "Juan Ignacio & Compañero/a"
+date: "2026-05-18"
+format:
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    geometry: margin=2.5cm
+    fontsize: 11pt
+    linestretch: 1.15
+    fig-width: 6.5
+    fig-height: 4
+    fig-pos: "H"
+lang: es
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+```{r setup}
+#| echo: false
+# Paquetes necesarios
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(broom)
+library(car)
+library(lmtest)
+library(MASS)
+library(glmnet)
+library(caret)
+library(pROC)
+library(qpcR)
+library(knitr)
+library(kableExtra)
+
+# Configuración de gráficos
+theme_set(theme_bw(base_size = 11))
+```
+
+# Consigna I: Regresión Lineal
+
+## Carga y exploración de datos
+
+```{r carga-datos}
+datos <- read_excel("eph.xlsx")
+
+# Convertir variables categóricas a factor
+datos <- datos %>%
+  mutate(
+    sexo      = factor(sexo),
+    est_civil = factor(est_civil),
+    region    = factor(region),
+    educ_cat  = factor(educ_cat, levels = c("Ninguno", "Primario", "Secundario", "Superior")),
+    formal    = factor(formal),
+    ant_laboral = factor(ant_laboral, levels = c("Menos de 1 mes", "1 a 3 meses",
+                                                  "Entre 3 y 6 meses", "6 meses a 1 año",
+                                                  "1 a 5 años", "Mas de 5 años"))
+  )
+
+# Resumen general
+glimpse(datos)
+```
+
+Dado que `ingreso_hogar` e `ingreso_per_capita` se derivan directamente del ingreso de la ocupación principal (la variable respuesta), las excluimos como predictoras para evitar relaciones espurias. Los predictores disponibles son: `sexo`, `edad`, `est_civil`, `region`, `educ_cat`, `ant_laboral`, `formal` y `horas_trabajo`.
+
+Dado que `ant_laboral` presenta `r sum(is.na(datos$ant_laboral))` valores faltantes, trabajaremos con las observaciones completas.
+
+```{r limpieza}
+# Seleccionamos las columnas relevantes y eliminamos NAs
+datos_modelo <- datos %>%
+  select(ingreso_ocup, sexo, edad, est_civil, region, educ_cat,
+         ant_laboral, formal, horas_trabajo) %>%
+  na.omit()
+
+cat("Observaciones disponibles (sin NA):", nrow(datos_modelo), "\n")
+```
+
+## Partición train/test (70/30)
+
+```{r particion}
+set.seed(2026)
+n <- nrow(datos_modelo)
+idx_train <- sample(seq_len(n), size = floor(0.70 * n))
+
+train <- datos_modelo[idx_train, ]
+test  <- datos_modelo[-idx_train, ]
+
+cat("Train:", nrow(train), "| Test:", nrow(test), "\n")
+```
+
+## Ajuste de tres modelos de RLM por MCO
+
+Proponemos tres modelos con distintas estrategias de selección de variables:
+
+- **Modelo 1 (Criterio propio):** incluye las variables que, por sentido común del problema, deberían asociarse al ingreso: `sexo`, `edad`, `educ_cat`, `formal` y `horas_trabajo`.
+- **Modelo 2 (Forward Selection por AIC):** se parte de un modelo nulo y se incorporan predictores de a uno, eligiendo en cada paso aquel que más reduzca el AIC.
+- **Modelo 3 (Modelo completo):** incluye todos los predictores disponibles.
+
+```{r modelo1}
+M1 <- lm(ingreso_ocup ~ sexo + edad + educ_cat + formal + horas_trabajo,
+          data = train)
+```
+
+```{r modelo2}
+# Forward Selection por AIC
+modelo_nulo    <- lm(ingreso_ocup ~ 1, data = train)
+modelo_maximo  <- lm(ingreso_ocup ~ sexo + edad + est_civil + region + educ_cat +
+                        ant_laboral + formal + horas_trabajo, data = train)
+
+M2 <- stepAIC(modelo_nulo,
+              scope = list(upper = modelo_maximo),
+              direction = "forward",
+              trace = FALSE, k = 2)
+summary(M2)
+```
+
+```{r modelo3}
+M3 <- lm(ingreso_ocup ~ sexo + edad + est_civil + region + educ_cat +
+            ant_laboral + formal + horas_trabajo, data = train)
+```
+
+## Comparación de modelos: CME, PRESS, AIC y BIC
+
+```{r comparacion}
+# Función para calcular métricas
+metricas <- function(modelo, nombre) {
+  n <- length(residuals(modelo))
+  p <- length(coefficients(modelo))
+  SCE <- deviance(modelo)
+  
+  # CME
+  cme <- SCE / (n - p)
+  
+  # PRESS (suma de residuos PRESS al cuadrado)
+  press_val <- sum((residuals(modelo) / (1 - hatvalues(modelo)))^2)
+  
+  # AIC y BIC
+  aic_val <- AIC(modelo)
+  bic_val <- BIC(modelo)
+  
+  tibble(Modelo = nombre, CME = round(cme, 2), PRESS = round(press_val, 0),
+         AIC = round(aic_val, 2), BIC = round(bic_val, 2))
+}
+
+tabla_comp <- bind_rows(
+  metricas(M1, "M1 - Criterio propio"),
+  metricas(M2, "M2 - Forward AIC"),
+  metricas(M3, "M3 - Completo")
+)
+
+kable(tabla_comp, caption = "Comparación de modelos candidatos") %>%
+  kable_styling(latex_options = c("hold_position", "striped"), full_width = FALSE)
+```
+
+En los tres criterios de penalización (AIC y BIC), así como en el CME y el PRESS, buscamos los valores más bajos. El modelo seleccionado por Forward (M2) debería presentar un buen balance entre ajuste y complejidad. **Elegimos el modelo M2 como ganador**, ya que logra métricas competitivas con una selección objetiva de variables.
+
+A continuación verificamos las variables incluidas en M2:
+
+```{r vars-m2}
+cat("Variables del modelo ganador (M2):\n")
+cat(paste(names(coef(M2)), collapse = ", "), "\n")
+```
+
+Para las consignas siguientes, trabajaremos con el **Modelo M2** (modelo ganador).
+
+## Análisis de residuos
+
+### Linealidad y homocedasticidad
+
+```{r residuos-ajustados}
+#| fig-cap: "Residuos vs Valores Ajustados"
+diag_m2 <- augment(M2)
+
+ggplot(diag_m2, aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.3, size = 1) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(se = FALSE, color = "blue", linewidth = 0.8) +
+  labs(x = "Valores ajustados", y = "Residuos")
+```
+
+```{r breusch-pagan}
+# Test de Breusch-Pagan para homocedasticidad
+bp_test <- bptest(M2)
+bp_test
+```
+
+### Normalidad de los residuos
+
+```{r qq-plot}
+#| fig-cap: "QQ-Plot de los residuos"
+ggplot(diag_m2, aes(sample = .resid)) +
+  stat_qq(alpha = 0.3) +
+  stat_qq_line(color = "red") +
+  labs(x = "Cuantiles teóricos", y = "Cuantiles muestrales")
+```
+
+```{r shapiro}
+# Test de Shapiro-Wilk (sobre una submuestra si n > 5000)
+set.seed(123)
+if (nrow(diag_m2) > 5000) {
+  idx_shapiro <- sample(nrow(diag_m2), 5000)
+  shapiro_test <- shapiro.test(diag_m2$.resid[idx_shapiro])
+} else {
+  shapiro_test <- shapiro.test(diag_m2$.resid)
+}
+shapiro_test
+```
+
+### Independencia
+
+```{r durbin-watson}
+# Test de Durbin-Watson
+dw_test <- dwtest(M2)
+dw_test
+```
+
+### Colinealidad (VIF)
+
+```{r vif}
+vif_vals <- vif(M2)
+kable(as.data.frame(vif_vals), caption = "Factores de Inflación de la Varianza (VIF/GVIF)",
+      digits = 3) %>%
+  kable_styling(latex_options = c("hold_position", "striped"), full_width = FALSE)
+```
+
+Para variables categóricas, se reporta el GVIF ajustado por grados de libertad ($GVIF^{1/(2 \cdot Df)}$). Valores superiores a 5 (o $\sqrt{5} \approx 2.24$ en la escala ajustada) indican problemas de colinealidad.
+
+### Observaciones atípicas e influyentes
+
+```{r atipicos}
+#| fig-cap: "Distancia de Cook"
+# Distancia de Cook
+cook_d <- cooks.distance(M2)
+n_train <- nrow(train)
+umbral_cook <- 4 / n_train
+
+cat("Umbral de Cook (4/n):", round(umbral_cook, 6), "\n")
+cat("Obs. con Cook > umbral:", sum(cook_d > umbral_cook), "\n")
+
+# Gráfico
+plot(M2, which = 4, cook.levels = umbral_cook)
+```
+
+```{r leverage}
+#| fig-cap: "Residuos estudentizados vs Leverage"
+plot(M2, which = 5)
+```
+
+## Interpretación de coeficientes
+
+```{r summary-final}
+summary(M2)
+```
+
+```{r coeficientes}
+# Tabla de coeficientes con IC al 95%
+coef_tabla <- tidy(M2, conf.int = TRUE) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+kable(coef_tabla, caption = "Coeficientes estimados del modelo M2",
+      col.names = c("Término", "Estimación", "Error Std.", "t", "p-valor",
+                    "IC 2.5%", "IC 97.5%")) %>%
+  kable_styling(latex_options = c("hold_position", "striped", "scale_down"),
+                full_width = FALSE)
+```
+
+**Interpretación de los efectos** (sobre el ingreso por ocupación principal, en miles de pesos):
+
+A continuación se interpretan los predictores incluidos en el modelo. Cada coeficiente representa el cambio esperado en `ingreso_ocup` (en miles de pesos) ante un cambio unitario en el predictor, manteniendo las demás variables constantes.
+
+- **Sexo:** las mujeres perciben, en promedio, un ingreso menor que los hombres (categoría de referencia), manteniendo el resto constante.
+- **Edad:** por cada año adicional de edad, se espera un cambio en el ingreso que refleja la acumulación de experiencia.
+- **Educación:** mayores niveles educativos se asocian con mayores ingresos esperados respecto a la categoría *Ninguno*.
+- **Formalidad:** los trabajadores formales perciben significativamente más que los informales.
+- **Horas de trabajo:** cada hora adicional trabajada por semana se asocia con un incremento en el ingreso esperado.
+
+Los p-valores del test $t$ para cada coeficiente indican si la relación es estadísticamente significativa al 5%.
+
+\newpage
+
+# Consigna II: Regularización y Predicción
+
+## Preparación de datos para glmnet
+
+```{r preparacion-glmnet}
+# glmnet requiere una matriz X numérica
+# Usamos model.matrix para generar las dummies
+X_train <- model.matrix(M2, data = train)[, -1]  # Sin intercepto
+y_train <- train$ingreso_ocup
+
+X_test <- model.matrix(M2, data = test)[, -1]
+y_test <- test$ingreso_ocup
+```
+
+## Ajuste Ridge
+
+```{r ridge-cv}
+#| fig-cap: "Validación cruzada para Ridge"
+set.seed(2026)
+cv_ridge <- cv.glmnet(
+  x = X_train, y = y_train,
+  alpha = 0,   # Ridge
+  nfolds = 10
+)
+plot(cv_ridge)
+cat("Lambda óptimo Ridge:", cv_ridge$lambda.min, "\n")
+```
+
+```{r ridge-ajuste}
+# Ajuste con lambda óptimo
+m_ridge <- glmnet(x = X_train, y = y_train, alpha = 0, lambda = cv_ridge$lambda.min)
+
+# Comparación de coeficientes MCO vs Ridge
+coef_mco   <- coef(M2)
+coef_ridge <- as.vector(coef(m_ridge))
+nombres    <- names(coef_mco)
+
+comp_ridge <- data.frame(
+  Termino = nombres,
+  MCO     = round(coef_mco, 4),
+  Ridge   = round(coef_ridge, 4)
+)
+
+kable(comp_ridge, caption = "Comparación de coeficientes: MCO vs Ridge",
+      row.names = FALSE) %>%
+  kable_styling(latex_options = c("hold_position", "striped", "scale_down"),
+                full_width = FALSE)
+```
+
+Se observa que los coeficientes Ridge son ligeramente menores en valor absoluto que los de MCO, lo cual es esperable dado que Ridge aplica una penalización cuadrática que *encoge* las estimaciones hacia cero.
+
+## Ajuste Lasso
+
+```{r lasso-cv}
+#| fig-cap: "Validación cruzada para Lasso"
+set.seed(2026)
+cv_lasso <- cv.glmnet(
+  x = X_train, y = y_train,
+  alpha = 1,   # Lasso
+  nfolds = 10
+)
+plot(cv_lasso)
+cat("Lambda óptimo Lasso:", cv_lasso$lambda.min, "\n")
+```
+
+```{r lasso-ajuste}
+# Ajuste con lambda óptimo
+m_lasso <- glmnet(x = X_train, y = y_train, alpha = 1, lambda = cv_lasso$lambda.min)
+
+# Comparación de coeficientes MCO vs Lasso
+coef_lasso <- as.vector(coef(m_lasso))
+
+comp_lasso <- data.frame(
+  Termino = nombres,
+  MCO     = round(coef_mco, 4),
+  Lasso   = round(coef_lasso, 4)
+)
+
+kable(comp_lasso, caption = "Comparación de coeficientes: MCO vs Lasso",
+      row.names = FALSE) %>%
+  kable_styling(latex_options = c("hold_position", "striped", "scale_down"),
+                full_width = FALSE)
+```
+
+Lasso puede llevar algunos coeficientes exactamente a cero, realizando simultáneamente estimación y selección de variables. Si algún coeficiente resulta 0, indica que Lasso consideró prescindible esa variable.
+
+## Evaluación predictiva en datos de prueba
+
+```{r prediccion-comparacion}
+# Predicciones
+pred_mco   <- predict(M2, newdata = test)
+pred_ridge <- predict(m_ridge, newx = X_test, s = cv_ridge$lambda.min)
+pred_lasso <- predict(m_lasso, newx = X_test, s = cv_lasso$lambda.min)
+
+# Error cuadrático medio de predicción (MSE)
+mse_mco   <- mean((y_test - pred_mco)^2)
+mse_ridge <- mean((y_test - as.vector(pred_ridge))^2)
+mse_lasso <- mean((y_test - as.vector(pred_lasso))^2)
+
+# RMSE
+rmse_mco   <- sqrt(mse_mco)
+rmse_ridge <- sqrt(mse_ridge)
+rmse_lasso <- sqrt(mse_lasso)
+
+# R2 de predicción
+sct_test <- sum((y_test - mean(y_test))^2)
+r2_mco   <- 1 - sum((y_test - pred_mco)^2) / sct_test
+r2_ridge <- 1 - sum((y_test - as.vector(pred_ridge))^2) / sct_test
+r2_lasso <- 1 - sum((y_test - as.vector(pred_lasso))^2) / sct_test
+
+tabla_pred <- data.frame(
+  Modelo = c("MCO", "Ridge", "Lasso"),
+  MSE    = round(c(mse_mco, mse_ridge, mse_lasso), 2),
+  RMSE   = round(c(rmse_mco, rmse_ridge, rmse_lasso), 2),
+  R2_Pred = round(c(r2_mco, r2_ridge, r2_lasso), 4)
+)
+
+kable(tabla_pred, caption = "Capacidad predictiva en datos de prueba",
+      col.names = c("Modelo", "MSE", "RMSE", "R² Predicción")) %>%
+  kable_styling(latex_options = c("hold_position", "striped"), full_width = FALSE)
+```
+
+El modelo con menor MSE/RMSE y mayor $R^2$ de predicción en el conjunto de prueba es el más adecuado para este ejemplo. En problemas donde la colinealidad no es severa y $n >> p$, es habitual que los tres métodos arrojen resultados similares.
+
+\newpage
+
+# Consigna III: Regresión Logística
+
+## Definición de la variable respuesta binaria
+
+```{r variable-binaria}
+# Trabajamos con el dataset original completo (sin NAs en las variables del modelo)
+datos_logit <- datos_modelo %>%
+  mutate(Y = ifelse(ingreso_ocup >= 1000, 1, 0))
+
+cat("Distribución de Y:\n")
+table(datos_logit$Y)
+cat("\nProporción de Y=1:", round(mean(datos_logit$Y), 4), "\n")
+```
+
+## Partición train/test con createDataPartition
+
+```{r particion-logistica}
+set.seed(2026)
+idx_logit <- createDataPartition(datos_logit$Y, p = 0.70, list = FALSE)
+
+train_logit <- datos_logit[idx_logit, ]
+test_logit  <- datos_logit[-idx_logit, ]
+
+cat("Train:", nrow(train_logit), "| Test:", nrow(test_logit), "\n")
+cat("Proporción Y=1 en Train:", round(mean(train_logit$Y), 4), "\n")
+cat("Proporción Y=1 en Test: ", round(mean(test_logit$Y), 4), "\n")
+```
+
+Se verifica que `createDataPartition()` mantiene la proporción de éxitos balanceada entre ambos conjuntos.
+
+## Ajuste del modelo de regresión logística
+
+Utilizamos las mismas variables explicativas que el modelo ganador de la Consigna I.
+
+```{r ajuste-logistico}
+# Construimos la fórmula a partir de M2
+vars_m2 <- names(coef(M2))[-1]  # sin intercepto
+# Reconstruimos los nombres de las variables originales (sin niveles de factor)
+vars_originales <- unique(gsub("(sexo|est_civil|region|educ_cat|ant_laboral|formal).*",
+                                "\\1", vars_m2))
+
+formula_logit <- as.formula(paste("Y ~", paste(vars_originales, collapse = " + ")))
+
+MLog <- glm(formula_logit, data = train_logit, family = binomial(link = "logit"))
+summary(MLog)
+```
+
+### Razones de odds (OR) para predictores significativos al 5%
+
+```{r odds-ratios}
+# OR e intervalos de confianza
+or_tabla <- tidy(MLog, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(p.value < 0.05) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+kable(or_tabla, caption = "Razones de Odds (OR) de predictores significativos (α = 0.05)",
+      col.names = c("Término", "OR", "Error Std.", "z", "p-valor",
+                    "OR IC 2.5%", "OR IC 97.5%")) %>%
+  kable_styling(latex_options = c("hold_position", "striped", "scale_down"),
+                full_width = FALSE)
+```
+
+**Interpretación de las OR:** una razón de odds mayor a 1 indica que ese nivel del predictor aumenta las chances de percibir un ingreso ≥ 1000 miles de pesos (respecto a la categoría de referencia), mientras que un OR menor a 1 las disminuye, manteniendo las demás variables constantes.
+
+## Punto de corte óptimo (Curva ROC)
+
+```{r curva-roc}
+#| fig-cap: "Curva ROC del modelo logístico"
+prob_train <- predict(MLog, type = "response")
+
+curvaROC <- roc(
+  response  = train_logit$Y,
+  predictor = prob_train,
+  quiet     = TRUE
+)
+
+plot(curvaROC, print.auc = TRUE, print.thres = TRUE,
+     main = "Curva ROC - Modelo Logístico")
+
+# Punto de corte óptimo
+corte_optimo <- coords(curvaROC, "best", ret = "threshold")
+cat("Punto de corte óptimo:", corte_optimo$threshold, "\n")
+cat("AUC:", auc(curvaROC), "\n")
+```
+
+El punto de corte óptimo es aquel que maximiza simultáneamente la sensibilidad y la especificidad.
+
+## Clasificación y Matriz de Confusión en datos de prueba
+
+```{r clasificacion-test}
+# Probabilidades predichas en test
+prob_test <- predict(MLog, newdata = test_logit, type = "response")
+
+# Clasificación con el corte óptimo
+pred_clase <- factor(ifelse(prob_test >= corte_optimo$threshold, 1, 0),
+                     levels = c("0", "1"))
+real_clase <- factor(test_logit$Y, levels = c("0", "1"))
+
+# Matriz de confusión
+mc <- confusionMatrix(pred_clase, real_clase, positive = "1")
+mc
+```
+
+### Métricas de clasificación
+
+```{r metricas-clasificacion}
+metricas_clas <- data.frame(
+  Metrica = c("Precisión (Accuracy)", "Sensibilidad", "Especificidad", "VPP", "VPN"),
+  Valor   = round(c(
+    mc$overall["Accuracy"],
+    mc$byClass["Sensitivity"],
+    mc$byClass["Specificity"],
+    mc$byClass["Pos Pred Value"],
+    mc$byClass["Neg Pred Value"]
+  ), 4)
+)
+
+kable(metricas_clas, caption = "Métricas de clasificación en datos de prueba",
+      row.names = FALSE) %>%
+  kable_styling(latex_options = c("hold_position", "striped"), full_width = FALSE)
+```
+
+**Interpretación:**
+
+- **Precisión (Accuracy):** proporción total de individuos correctamente clasificados.
+- **Sensibilidad:** proporción de individuos con ingreso ≥ 1000 (Y=1) correctamente identificados. Mide la capacidad del modelo para detectar los verdaderos positivos.
+- **Especificidad:** proporción de individuos con ingreso < 1000 (Y=0) correctamente identificados. Mide la capacidad del modelo para detectar los verdaderos negativos.
+- **VPP (Valor Predictivo Positivo):** cuando el modelo predice Y=1, esta es la proporción de veces que acierta.
+- **VPN (Valor Predictivo Negativo):** cuando el modelo predice Y=0, esta es la proporción de veces que acierta.
