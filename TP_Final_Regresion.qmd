@@ -1,7 +1,7 @@
 ---
 title: "Trabajo Práctico Final - Regresión Avanzada"
 subtitle: "Maestría en Explotación de Datos y Gestión del Conocimiento - Universidad Austral"
-author: "Juan Ignacio & Compañero/a"
+author: "Juan Ignacio Cacchione y Mariangeles Alomar"
 date: "2026-05-18"
 format:
   pdf:
@@ -34,9 +34,9 @@ library(MASS)
 library(glmnet)
 library(caret)
 library(pROC)
-library(qpcR)
 library(knitr)
 library(kableExtra)
+select <- dplyr::select
 
 # Configuración de gráficos
 theme_set(theme_bw(base_size = 11))
@@ -73,7 +73,7 @@ Dado que `ant_laboral` presenta `r sum(is.na(datos$ant_laboral))` valores faltan
 ```{r limpieza}
 # Seleccionamos las columnas relevantes y eliminamos NAs
 datos_modelo <- datos %>%
-  select(ingreso_ocup, sexo, edad, est_civil, region, educ_cat,
+  dplyr::select(ingreso_ocup, sexo, edad, est_civil, region, educ_cat,
          ant_laboral, formal, horas_trabajo) %>%
   na.omit()
 
@@ -97,9 +97,9 @@ cat("Train:", nrow(train), "| Test:", nrow(test), "\n")
 
 Proponemos tres modelos con distintas estrategias de selección de variables:
 
-- **Modelo 1 (Criterio propio):** incluye las variables que, por sentido común del problema, deberían asociarse al ingreso: `sexo`, `edad`, `educ_cat`, `formal` y `horas_trabajo`.
-- **Modelo 2 (Forward Selection por AIC):** se parte de un modelo nulo y se incorporan predictores de a uno, eligiendo en cada paso aquel que más reduzca el AIC.
-- **Modelo 3 (Modelo completo):** incluye todos los predictores disponibles.
+-   **Modelo 1 (Criterio propio):** incluye las variables que, por sentido común del problema, deberían asociarse al ingreso: `sexo`, `edad`, `educ_cat`, `formal` y `horas_trabajo`.
+-   **Modelo 2 (Forward Selection por AIC):** se parte de un modelo nulo y se incorporan predictores de a uno, eligiendo en cada paso aquel que más reduzca el AIC.
+-   **Modelo 3 (Modelo completo):** incluye todos los predictores disponibles.
 
 ```{r modelo1}
 M1 <- lm(ingreso_ocup ~ sexo + edad + educ_cat + formal + horas_trabajo,
@@ -273,11 +273,11 @@ kable(coef_tabla, caption = "Coeficientes estimados del modelo M2",
 
 A continuación se interpretan los predictores incluidos en el modelo. Cada coeficiente representa el cambio esperado en `ingreso_ocup` (en miles de pesos) ante un cambio unitario en el predictor, manteniendo las demás variables constantes.
 
-- **Sexo:** las mujeres perciben, en promedio, un ingreso menor que los hombres (categoría de referencia), manteniendo el resto constante.
-- **Edad:** por cada año adicional de edad, se espera un cambio en el ingreso que refleja la acumulación de experiencia.
-- **Educación:** mayores niveles educativos se asocian con mayores ingresos esperados respecto a la categoría *Ninguno*.
-- **Formalidad:** los trabajadores formales perciben significativamente más que los informales.
-- **Horas de trabajo:** cada hora adicional trabajada por semana se asocia con un incremento en el ingreso esperado.
+-   **Sexo:** las mujeres perciben, en promedio, un ingreso menor que los hombres (categoría de referencia), manteniendo el resto constante.
+-   **Edad:** por cada año adicional de edad, se espera un cambio en el ingreso que refleja la acumulación de experiencia.
+-   **Educación:** mayores niveles educativos se asocian con mayores ingresos esperados respecto a la categoría *Ninguno*.
+-   **Formalidad:** los trabajadores formales perciben significativamente más que los informales.
+-   **Horas de trabajo:** cada hora adicional trabajada por semana se asocia con un incremento en el ingreso esperado.
 
 Los p-valores del test $t$ para cada coeficiente indican si la relación es estadísticamente significativa al 5%.
 
@@ -533,8 +533,8 @@ kable(metricas_clas, caption = "Métricas de clasificación en datos de prueba",
 
 **Interpretación:**
 
-- **Precisión (Accuracy):** proporción total de individuos correctamente clasificados.
-- **Sensibilidad:** proporción de individuos con ingreso ≥ 1000 (Y=1) correctamente identificados. Mide la capacidad del modelo para detectar los verdaderos positivos.
-- **Especificidad:** proporción de individuos con ingreso < 1000 (Y=0) correctamente identificados. Mide la capacidad del modelo para detectar los verdaderos negativos.
-- **VPP (Valor Predictivo Positivo):** cuando el modelo predice Y=1, esta es la proporción de veces que acierta.
-- **VPN (Valor Predictivo Negativo):** cuando el modelo predice Y=0, esta es la proporción de veces que acierta.
+-   **Precisión (Accuracy):** proporción total de individuos correctamente clasificados.
+-   **Sensibilidad:** proporción de individuos con ingreso ≥ 1000 (Y=1) correctamente identificados. Mide la capacidad del modelo para detectar los verdaderos positivos.
+-   **Especificidad:** proporción de individuos con ingreso \< 1000 (Y=0) correctamente identificados. Mide la capacidad del modelo para detectar los verdaderos negativos.
+-   **VPP (Valor Predictivo Positivo):** cuando el modelo predice Y=1, esta es la proporción de veces que acierta.
+-   **VPN (Valor Predictivo Negativo):** cuando el modelo predice Y=0, esta es la proporción de veces que acierta.
